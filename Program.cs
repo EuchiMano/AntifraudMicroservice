@@ -1,13 +1,27 @@
+using System.Threading;
+using AntiFraudMicroservice.Data;
+using AntiFraudMicroservice.Services;
+using Confluent.Kafka;
+using Microsoft.EntityFrameworkCore;
+
 var builder = WebApplication.CreateBuilder(args);
 
-// Add services to the container.
-// Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
+builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
+builder.Services.AddLogging();
+
+builder.Services.AddDbContext<ApplicationDbContext>(options =>
+    options.UseNpgsql(builder.Configuration.GetConnectionString("DefaultConnection"))
+);
+
+builder.Services.AddSingleton<KafkaProducerService>();
+builder.Services.AddScoped<TransactionService>();
+builder.Services.AddScoped<AntiFraudConsumerService>();
+builder.Services.AddScoped<TransactionStatusConsumerService>();
 
 var app = builder.Build();
 
-// Configure the HTTP request pipeline.
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
@@ -15,30 +29,26 @@ if (app.Environment.IsDevelopment())
 }
 
 app.UseHttpsRedirection();
+app.UseAuthorization();
+app.MapControllers();
 
-var summaries = new[]
-{
-    "Freezing", "Bracing", "Chilly", "Cool", "Mild", "Warm", "Balmy", "Hot", "Sweltering", "Scorching"
-};
+var cancellationTokenSource = new CancellationTokenSource();
 
-app.MapGet("/weatherforecast", () =>
+app.Lifetime.ApplicationStarted.Register(() =>
 {
-    var forecast =  Enumerable.Range(1, 5).Select(index =>
-        new WeatherForecast
-        (
-            DateOnly.FromDateTime(DateTime.Now.AddDays(index)),
-            Random.Shared.Next(-20, 55),
-            summaries[Random.Shared.Next(summaries.Length)]
-        ))
-        .ToArray();
-    return forecast;
-})
-.WithName("GetWeatherForecast")
-.WithOpenApi();
+    var scope = app.Services.CreateScope();
+    var antiFraudConsumerService =
+        scope.ServiceProvider.GetRequiredService<AntiFraudConsumerService>();
+    var transactionStatusConsumerService =
+        scope.ServiceProvider.GetRequiredService<TransactionStatusConsumerService>();
+
+    Task.Run(() => antiFraudConsumerService.StartConsuming(cancellationTokenSource.Token));
+    Task.Run(() => transactionStatusConsumerService.StartConsuming(cancellationTokenSource.Token));
+});
+
+app.Lifetime.ApplicationStopping.Register(() =>
+{
+    cancellationTokenSource.Cancel();
+});
 
 app.Run();
-
-record WeatherForecast(DateOnly Date, int TemperatureC, string? Summary)
-{
-    public int TemperatureF => 32 + (int)(TemperatureC / 0.5556);
-}
